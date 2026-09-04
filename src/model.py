@@ -26,7 +26,7 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.optimizers import Adam
 
 
-def build_model_batchnorm(num_classes, input_shape=(32, 32, 1)):
+def build_model(num_classes, input_shape=(32, 32, 1)):
     """Build and compile the BatchNorm CNN.
 
     Parameters
@@ -46,33 +46,33 @@ def build_model_batchnorm(num_classes, input_shape=(32, 32, 1)):
         # --- Block 1: 32 filters ------------------------------------------
         # Conv extracts features -> BatchNorm normalizes them -> ReLU clips.
         layers.Conv2D(32, (3, 3), padding="same"),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(momentum=0.9),
         layers.Activation("relu"),
         layers.MaxPooling2D((2, 2)),
 
         # --- Block 2: 64 filters ------------------------------------------
         layers.Conv2D(64, (3, 3), padding="same"),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(momentum=0.9),
         layers.Activation("relu"),
         layers.MaxPooling2D((2, 2)),
 
         # --- Block 3: 128 filters -----------------------------------------
         layers.Conv2D(128, (3, 3), padding="same"),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(momentum=0.9),
         layers.Activation("relu"),
         layers.MaxPooling2D((2, 2)),
 
         # --- Block 4: 256 filters (no pooling after this one) -------------
         # A final, wider feature-extraction block for richer representations.
         layers.Conv2D(256, (3, 3), padding="same"),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(momentum=0.9),
         layers.Activation("relu"),
 
         # --- Classifier head ----------------------------------------------
         # Flatten: 3D feature maps -> 1D vector (only 2D->1D step, at the end).
         layers.Flatten(),
         layers.Dense(256),
-        layers.BatchNormalization(),
+        layers.BatchNormalization(momentum=0.9),
         layers.Activation("relu"),
         # Dropout 0.6: switch off 60% of neurons during training only, to fight
         # overfitting (a bit stronger than the usual 0.5 given the added depth).
@@ -90,7 +90,7 @@ def build_model_batchnorm(num_classes, input_shape=(32, 32, 1)):
     return model
 
 
-def build_model(num_classes, input_shape=(32, 32, 1)):
+def build_model_(num_classes, input_shape=(32, 32, 1)):
     model = models.Sequential([
         layers.Input(shape=input_shape),
         layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
