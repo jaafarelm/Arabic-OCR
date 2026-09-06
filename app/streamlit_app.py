@@ -1,80 +1,106 @@
 """
-streamlit_app.py — Web demo for the Arabic character recognizer (v0.1).
+streamlit_app.py — Web demo for the Arabic character recognizer (v0.2).
 
-Upload an image of a single handwritten Arabic character; the app preprocesses
-it (via the SAME shared pipeline used in training) and shows the model's top
-predictions.
+Two ways to input a character:
+  1. DRAW it on a canvas (recommended) — you control background & ink, so the
+     input is crisp black-on-white, matching the training data. This avoids the
+     contrast/texture problems that photos suffer from.
+  2. UPLOAD an image — works best with a clean, high-contrast photo.
+
+Both paths feed the SAME predict() -> preprocess_image() pipeline.
 
 Run with:  streamlit run app/streamlit_app.py
-
-Design notes for reviewers:
-    - The app is a thin UI wrapper around predict.py — no ML logic here.
-    - Predictions are shown as class IDs + confidence, honestly. Human-readable
-      letter names are a v0.2 addition (the shipped label mapping is unreliable).
-    - v0.1 KNOWN LIMITATION: the model expects a tightly-cropped character that
-      fills the frame; upload a cropped image for best results.
+Requires:  pip install "streamlit-drawable-canvas[image]"
 """
 
 import sys
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
-# Make the src/ modules importable when running from the project root.
+# Make src/ importable.
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from predict import predict  # noqa: E402  (import after sys.path tweak)
+from predict import predict  # noqa: E402
 
 
-# --- Page setup ------------------------------------------------------------
 st.set_page_config(page_title="Arabic Character Recognizer", page_icon="✒️")
-
 st.title("✒️ Arabic Handwritten Character Recognizer")
-st.caption(
-    "Upload an image of a single handwritten Arabic character. "
-    "For best results, crop the image so the character fills most of the frame."
-)
-
-# Honest disclaimer — sets expectations for a v0.1 baseline.
 st.info(
-    "This is a v0.1 baseline model. Accuracy is limited and predictions are "
-    "shown as class IDs (readable letter names are planned for v0.2)."
+    "v0.2 baseline. Predictions are shown as class IDs (readable letter names "
+    "are planned). Draw a single character below, or upload an image."
 )
 
-# --- File uploader ---------------------------------------------------------
-uploaded = st.file_uploader(
-    "Choose an image", type=["png", "jpg", "jpeg", "bmp"]
-)
 
-if uploaded is not None:
-    # Show what was uploaded.
-    image = Image.open(uploaded)
+def show_prediction(result):
+    """Render a prediction result (shared by both input paths)."""
+    st.metric(
+        label="Predicted letter",
+        value=result["name"],
+        delta=f"{result['confidence']:.1%} confidence",
+    )
+    st.write("**Top 3 guesses:**")
+    for class_id, name, prob in result["top_k"]:   # note: now 3 values
+        st.write(f"**{name}**")
+        st.progress(min(prob, 1.0))
+        st.caption(f"{prob:.1%}")
+
+tab_draw, tab_upload = st.tabs(["✏️ Draw", "📁 Upload"])
+
+# --- Draw tab -------------------------------------------------------------
+with tab_draw:
+    st.caption("Draw a single Arabic character, then it predicts automatically.")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Your image")
-        st.image(image, use_container_width=True)
-
-    # Run the prediction (predict.py handles preprocessing internally).
-    with col2:
-        st.subheader("Prediction")
-        with st.spinner("Analyzing..."):
-            result = predict(image, top_k=3)
-
-        # Headline result.
-        st.metric(
-            label="Predicted class",
-            value=f"Class {result['class_id']}",
-            delta=f"{result['confidence']:.1%} confidence",
+        # White canvas, black stroke: matches the training convention
+        # (dark ink on light background) at the SOURCE.
+        canvas = st_canvas(
+            fill_color="rgba(0,0,0,1)",
+            stroke_width=6,             # thick, so it resembles training strokes
+            stroke_color="#000000",      # black ink
+            background_color="#FFFFFF",  # white background
+            height=280,
+            width=280,
+            drawing_mode="freedraw",
+            key="canvas",
+            return_image_data=True,      # required so we can read canvas.image_data
         )
 
-        # Top-3 guesses as labelled progress bars.
-        st.write("**Top 3 guesses:**")
-        for class_id, prob in result["top_k"]:
-            st.write(f"Class {class_id}")
-            st.progress(min(prob, 1.0))
-            st.caption(f"{prob:.1%}")
-else:
-    st.write("👆 Upload an image to get a prediction.")
+    with col2:
+        if canvas.image_data is not None:
+            drawn = canvas.image_data  # RGBA numpy array
+            # A pixel is "ink" if it's dark. On a white canvas, blank = all 255.
+            has_ink = (drawn[:, :, :3] < 128).any()
+
+            if has_ink:
+                # Convert RGBA canvas -> RGB PIL image and predict.
+                img = Image.fromarray(drawn.astype("uint8")).convert("RGB")
+                result = predict(img, top_k=3)
+                show_prediction(result)
+            else:
+                st.write("👈 Draw a character to see a prediction.")
+        else:
+            st.write("👈 Draw a character to see a prediction.")
+
+# --- Upload tab -----------------------------------------------------------
+with tab_upload:
+    st.caption(
+        "Upload a clean, high-contrast image of a single character "
+        "(white background, dark ink works best)."
+    )
+    uploaded = st.file_uploader("Choose an image", type=["png", "jpg", "jpeg", "bmp"])
+
+    if uploaded is not None:
+        image = Image.open(uploaded)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.image(image, use_container_width=True)
+        with c2:
+            with st.spinner("Analyzing..."):
+                result = predict(image, top_k=3)
+            show_prediction(result)

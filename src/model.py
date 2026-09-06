@@ -1,118 +1,126 @@
 """
-model.py — CNN architecture (BatchNorm variant) for Arabic character recognition.
+model.py — ResNet-style CNN in PyTorch for Arabic isolated-character recognition.
 
-This is the stronger of the two architectures considered: four convolution
-blocks with BatchNormalization, followed by a dense classifier head.
+Ported from Keras to PyTorch so training can run on the RTX 5070 Ti (Blackwell,
+sm_120), which TensorFlow does not support.
 
-Why BatchNormalization:
-  It re-normalizes each layer's activations (roughly mean 0, std 1) per batch,
-  keeping the scale of the numbers stable as they flow through the network.
-  That makes training faster and more stable, and usually improves accuracy.
+Architecture is the same ResNet pattern as before:
+    stem conv -> 3 residual stages (64 -> 128 -> 256) -> global avg pool -> FC
 
-Why the order is Conv -> BatchNorm -> Activation('relu'):
-  ReLU discards all negative values. If we normalized AFTER relu, we'd be
-  normalizing data that's already been clipped. Putting BatchNorm BEFORE relu
-  normalizes the full signal (positive AND negative) first, then relu clips
-  well-scaled data. So: extract features -> normalize them -> apply nonlinearity.
+Why residual blocks:
+    Each block learns a RESIDUAL correction added to its own input via a skip
+    connection:  output = input + F(input).  This keeps gradients flowing
+    through deep stacks so the network trains reliably.
 
-Design notes for reviewers:
-  - num_classes is passed in, never hardcoded (the old notebook hardcoded it).
-  - Loss is sparse_categorical_crossentropy (labels are integers 0..N-1).
-  - BatchNorm uses batch statistics during training and running averages at
-    inference; Keras handles that switch automatically inside model.predict().
+PyTorch differences from Keras to note while reading:
+    - You define layers in __init__ and wire them in forward().
+    - There is no .compile(); loss and optimizer live in the training script.
+    - Conv2d takes (in_channels, out_channels), so each layer must know its
+      input channel count explicitly.
 """
 
-from tensorflow.keras import layers, models
-from tensorflow.keras.optimizers import Adam
+import torch
+import torch.nn as nn
 
 
-def build_model(num_classes, input_shape=(32, 32, 1)):
-    """Build and compile the BatchNorm CNN.
+class ResidualBlock(nn.Module):
+    """Two 3x3 convs plus a skip connection.
 
-    Parameters
-    ----------
-    num_classes : int
-        Number of output classes; pass len(np.unique(y_train)), never hardcode.
-    input_shape : tuple
-        Shape of one input image. (32, 32, 1) = 32x32 grayscale.
-
-    Returns
-    -------
-    A compiled tf.keras.Model, ready for .fit().
+    If downsample=True the block halves the spatial size (stride 2) and the
+    shortcut uses a 1x1 conv so its shape matches the main path.
     """
-    model = models.Sequential([
-        layers.Input(shape=input_shape),
 
-        # --- Block 1: 32 filters ------------------------------------------
-        # Conv extracts features -> BatchNorm normalizes them -> ReLU clips.
-        layers.Conv2D(32, (3, 3), padding="same"),
-        layers.BatchNormalization(momentum=0.9),
-        layers.Activation("relu"),
-        layers.MaxPooling2D((2, 2)),
+    def __init__(self, in_channels, out_channels, downsample=False):
+        super().__init__()
+        stride = 2 if downsample else 1
 
-        # --- Block 2: 64 filters ------------------------------------------
-        layers.Conv2D(64, (3, 3), padding="same"),
-        layers.BatchNormalization(momentum=0.9),
-        layers.Activation("relu"),
-        layers.MaxPooling2D((2, 2)),
+        # --- Main path: Conv -> BN -> ReLU -> Conv -> BN ---
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                               stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels, momentum=0.1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels, momentum=0.1)
+        self.relu = nn.ReLU(inplace=True)
 
-        # --- Block 3: 128 filters -----------------------------------------
-        layers.Conv2D(128, (3, 3), padding="same"),
-        layers.BatchNormalization(momentum=0.9),
-        layers.Activation("relu"),
-        layers.MaxPooling2D((2, 2)),
+        # --- Shortcut: match shape only if we downsampled or changed channels ---
+        if downsample or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1,
+                          stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels, momentum=0.1),
+            )
+        else:
+            self.shortcut = nn.Identity()   # pass the input through unchanged
 
-        # --- Block 4: 256 filters (no pooling after this one) -------------
-        # A final, wider feature-extraction block for richer representations.
-        layers.Conv2D(256, (3, 3), padding="same"),
-        layers.BatchNormalization(momentum=0.9),
-        layers.Activation("relu"),
+    def forward(self, x):
+        identity = self.shortcut(x)
 
-        # --- Classifier head ----------------------------------------------
-        # Flatten: 3D feature maps -> 1D vector (only 2D->1D step, at the end).
-        layers.Flatten(),
-        layers.Dense(256),
-        layers.BatchNormalization(momentum=0.9),
-        layers.Activation("relu"),
-        # Dropout 0.6: switch off 60% of neurons during training only, to fight
-        # overfitting (a bit stronger than the usual 0.5 given the added depth).
-        layers.Dropout(0.6),
-        # One output per class; softmax -> probabilities that sum to 1.
-        layers.Dense(num_classes, activation="softmax"),
-    ])
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
 
-    model.compile(
-        optimizer=Adam(learning_rate=0.0001),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-
-    return model
+        out = out + identity      # the skip connection
+        return self.relu(out)
 
 
-def build_model_(num_classes, input_shape=(32, 32, 1)):
-    model = models.Sequential([
-        layers.Input(shape=input_shape),
-        layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(128, (3, 3), activation="relu", padding="same"),
-        layers.MaxPooling2D((2, 2)),
-        layers.Flatten(),
-        layers.Dense(128, activation="relu"),
-        layers.Dropout(0.5),
-        layers.Dense(num_classes, activation="softmax"),
-    ])
-    model.compile(
-        optimizer=Adam(learning_rate=0.0001),   # keep the LR fix
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    return model
+class ResNetCNN(nn.Module):
+    """ResNet-style classifier for 32x32 single-channel character images."""
 
-# Quick manual check: build the model and print its layer summary.
+    def __init__(self, num_classes, in_channels=1):
+        super().__init__()
+
+        # --- Stem: initial conv before the residual stages ---
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64, momentum=0.1),
+            nn.ReLU(inplace=True),
+        )
+
+        # --- Residual stages: channels grow as spatial size shrinks ---
+        self.stage1 = nn.Sequential(          # 32x32, 64 channels
+            ResidualBlock(64, 64),
+            ResidualBlock(64, 64),
+        )
+        self.stage2 = nn.Sequential(          # -> 16x16, 128 channels
+            ResidualBlock(64, 128, downsample=True),
+            ResidualBlock(128, 128),
+        )
+        self.stage3 = nn.Sequential(          # -> 8x8, 256 channels
+            ResidualBlock(128, 256, downsample=True),
+            ResidualBlock(256, 256),
+        )
+
+        # --- Head ---
+        # Global average pooling collapses each feature map to one number:
+        # far fewer parameters than flatten+dense, and less overfitting.
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.5)
+        self.fc = nn.Linear(256, num_classes)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+
+        x = self.pool(x)              # (batch, 256, 1, 1)
+        x = torch.flatten(x, 1)       # (batch, 256)
+        x = self.dropout(x)
+        # NOTE: no softmax here — PyTorch's CrossEntropyLoss expects raw logits.
+        return self.fc(x)
+
+
+def build_model(num_classes, in_channels=1):
+    """Factory kept for parity with the old Keras API."""
+    return ResNetCNN(num_classes=num_classes, in_channels=in_channels)
+
+
 if __name__ == "__main__":
     m = build_model(num_classes=115)
-    m.summary()
-    
+    n_params = sum(p.numel() for p in m.parameters())
+    print(m)
+    print(f"\nTotal parameters: {n_params:,}")
+
+    # Shape check: a batch of 4 grayscale 32x32 images -> 115 class scores.
+    dummy = torch.randn(4, 1, 32, 32)
+    print("Output shape:", m(dummy).shape)   # expect torch.Size([4, 115])

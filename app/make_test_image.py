@@ -3,7 +3,7 @@ from PIL import Image
 
 labels = np.loadtxt("data/labels.csv", dtype=int)
 # grab the first sample of a few different classes
-wanted = [0, 5, 32, 60]  
+wanted = [12, 17, 45, 62]  
 saved = {}
 with open("data/images.csv") as f:
     for i, row in enumerate(csv.reader(f)):
