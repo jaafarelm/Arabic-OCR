@@ -8,6 +8,7 @@
 torch
 torchvision
 streamlit>=1.30
+streamlit-drawable-canvas
 numpy
 pandas
 pillow
