@@ -1,0 +1,7 @@
+# Runtime deps for the Docker image (torch/torchvision installed separately
+# from the CPU index in the Dockerfile, so they are NOT listed here).
+streamlit>=1.30
+streamlit-drawable-canvas[image]
+numpy
+pandas
+pillow

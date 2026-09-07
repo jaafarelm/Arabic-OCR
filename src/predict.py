@@ -16,6 +16,7 @@ PyTorch notes:
 """
 
 from pathlib import Path
+from label_map import num_classes
 
 import numpy as np
 import torch
@@ -27,7 +28,7 @@ from model import build_model
 
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "best_model.pt"
-NUM_CLASSES = 46          # must match what train.py used
+NUM_CLASSES = num_classes()          # must match what train.py used
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
