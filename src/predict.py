@@ -27,7 +27,7 @@ from model import build_model
 
 
 MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "best_model.pt"
-NUM_CLASSES = 115          # must match what train.py used
+NUM_CLASSES = 46          # must match what train.py used
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

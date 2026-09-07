@@ -30,3 +30,11 @@ venv/
 
 # Old dissertation data dump — large files
 Old/
+
+# Data — large files, download separately (see README)
+data/*
+!data/.gitkeep
+
+# Trained models — regenerate with train.py
+models/*
+!models/.gitkeep

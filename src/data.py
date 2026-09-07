@@ -1,22 +1,35 @@
 """
-data.py — Data loading and splitting for the Arabic handwritten character recognizer.
+data.py — Load, collapse, MERGE two datasets, and split.
 
-Responsibilities (and ONLY these — keep this file focused):
-  1. Load the flattened image pixels and their integer labels from CSV.
-  2. Reshape the flat pixel rows back into 32x32 single-channel images.
-  3. Normalize pixel values to the [0, 1] range.
-  4. Split into train / validation / test sets, honestly.
+Datasets combined:
+  1. HMBD  (data/images.csv, data/labels.csv)
+     53,184 samples, 115 positional-form classes, black ink on white.
+  2. AHCD  (data/ahcd_images.csv, data/ahcd_labels.csv)
+     16,800 samples, 28 base-letter classes, WHITE ink on BLACK, and stored
+     TRANSPOSED (letters appear rotated until you transpose each 32x32 image).
+
+WHY MERGE:
+  The model was overfitting to HMBD's single writing style, so it failed on
+  any other style (canvas drawings, photos). AHCD is a different collection
+  with different writers and stroke styles. Training on both forces the model
+  to learn what makes a letter that letter, rather than memorising one
+  dataset's look.
+
+  The 115 -> 46 base-letter collapse is what makes the merge possible: AHCD
+  has no positional forms, so the two label systems only line up once HMBD's
+  four forms per letter are collapsed into one.
+
+AHCD FIXES APPLIED (both are essential — verified visually):
+  - TRANSPOSE each image (AHCD is stored row/column swapped).
+  - INVERT pixels (255 - x) so it matches HMBD's black-on-white convention.
+  - Remap AHCD labels 1..28 -> the matching base-class ids.
 
 Design notes for reviewers:
-  - The raw CSVs have NO header row, so we load with header=None. Loading with a
-    header would silently consume the first real image row as column names.
-  - images.csv and labels.csv are row-aligned (row i in one corresponds to row i
-    in the other). We never break that alignment.
-  - We use a three-way split (train/val/test). The test set is touched ONCE, at
-    final evaluation, so it stays an honest measure of unseen performance.
-  - KNOWN LIMITATION: HMBD as distributed carries no writer identifiers, so a
-    writer-independent split is not possible. Some writer leakage may remain.
-    This is documented rather than hidden.
+  - CSVs have NO header row; loaded with header=None throughout.
+  - Image/label alignment is asserted, never assumed.
+  - Three-way stratified split; the test set is touched ONCE, at final eval.
+  - KNOWN LIMITATION: neither dataset carries writer identifiers, so a
+    writer-independent split is not possible; some writer leakage may remain.
 """
 
 from pathlib import Path
@@ -25,120 +38,130 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from label_map import OLD_TO_BASE, AHCD_TO_BASE, NUM_BASE_CLASSES
 
-# --- Constants -------------------------------------------------------------
 
-# Each image is a flattened 32x32 grayscale square (1024 pixel values per row).
 IMG_SIZE = 32
-N_PIXELS = IMG_SIZE * IMG_SIZE  # 1024
-
-# Where the data lives, relative to the project root.
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+# HMBD
 IMAGES_CSV = DATA_DIR / "images.csv"
 LABELS_CSV = DATA_DIR / "labels.csv"
 
-# Fixed seed so the split is reproducible run-to-run.
+# AHCD (optional — merged only if the files are present)
+AHCD_IMAGES = DATA_DIR / "ahcd_images.csv"
+AHCD_LABELS = DATA_DIR / "ahcd_labels.csv"
+
 RANDOM_SEED = 42
 
 
-# --- Loading ---------------------------------------------------------------
+# --- HMBD ------------------------------------------------------------------
 
-def load_raw():
-    """Load pixel data and labels from CSV as aligned NumPy arrays.
+def load_hmbd():
+    """Load HMBD, drop the junk class, collapse 115 labels -> 46 base classes.
 
-    Returns
-    -------
-    X : np.ndarray, shape (n_samples, 1024), dtype float
-        Raw flattened pixel values (0-255), not yet normalized or reshaped.
-    y : np.ndarray, shape (n_samples,), dtype int
-        Integer class label for each image.
+    Returns X (N, 1024) uint8-ish floats and y (N,) collapsed labels.
     """
-    # header=None is REQUIRED: the CSVs start straight at data, no column names.
     X = pd.read_csv(IMAGES_CSV, header=None).values
-    y = pd.read_csv(LABELS_CSV, header=None).values.ravel()  # flatten to 1-D
+    y = pd.read_csv(LABELS_CSV, header=None).values.ravel()
+    assert X.shape[0] == y.shape[0], "HMBD image/label row mismatch"
 
-    # Sanity check: the two files must stay row-aligned. If they ever drift,
-    # every label would point at the wrong image — so we fail loudly here.
-    assert X.shape[0] == y.shape[0], (
-        f"Row mismatch: {X.shape[0]} images vs {y.shape[0]} labels"
-    )
+    # Keep only labels that have a base mapping. The junk class (24, the
+    # ingested ".ipynb_checkpoints" folder) has none, so its rows are dropped
+    # from BOTH arrays, preserving alignment.
+    keep = np.array([lbl in OLD_TO_BASE for lbl in y])
+    dropped = int((~keep).sum())
+    X, y = X[keep], y[keep]
+    y = np.array([OLD_TO_BASE[l] for l in y], dtype=np.int64)
 
+    print(f"HMBD: {X.shape[0]} samples "
+          f"({dropped} junk rows dropped), {len(np.unique(y))} base classes")
     return X, y
 
 
-# --- Shaping and scaling ---------------------------------------------------
+# --- AHCD ------------------------------------------------------------------
+
+def load_ahcd():
+    """Load AHCD, fix orientation/inversion, remap labels to base classes.
+
+    Returns (X, y) or (None, None) if the files are not present.
+    """
+    if not (AHCD_IMAGES.exists() and AHCD_LABELS.exists()):
+        print("AHCD: files not found, skipping merge")
+        return None, None
+
+    X = pd.read_csv(AHCD_IMAGES, header=None).values
+    y = pd.read_csv(AHCD_LABELS, header=None).values.ravel()
+    assert X.shape[0] == y.shape[0], "AHCD image/label row mismatch"
+
+    # --- FIX 1: transpose. AHCD stores each image row/column swapped, so
+    # letters appear rotated. Reshape to 32x32, transpose, flatten back.
+    X = X.reshape(-1, IMG_SIZE, IMG_SIZE).transpose(0, 2, 1).reshape(-1, IMG_SIZE * IMG_SIZE)
+
+    # --- FIX 2: invert. AHCD is white ink on black; HMBD is black on white.
+    X = 255 - X
+
+    # --- FIX 3: remap labels 1..28 -> base class ids.
+    keep = np.array([lbl in AHCD_TO_BASE for lbl in y])
+    X, y = X[keep], y[keep]
+    y = np.array([AHCD_TO_BASE[l] for l in y], dtype=np.int64)
+
+    print(f"AHCD: {X.shape[0]} samples (transposed + inverted), "
+          f"{len(np.unique(y))} base classes")
+    return X, y
+
+
+# --- Combine, scale, split -------------------------------------------------
 
 def prepare_images(X):
-    """Turn flat pixel rows into normalized 32x32x1 image tensors.
-
-    Parameters
-    ----------
-    X : np.ndarray, shape (n_samples, 1024)
-
-    Returns
-    -------
-    np.ndarray, shape (n_samples, 32, 32, 1), values in [0, 1]
-    """
-    # Scale 0-255 -> 0-1. Neural nets train more stably on small inputs.
+    """Flat pixel rows -> normalized (N, 32, 32, 1) float tensors in [0, 1]."""
     X = X.astype("float32") / 255.0
+    return X.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
 
-    # Restore the 2-D spatial shape the CNN needs. The trailing 1 is the single
-    # grayscale channel (Keras Conv2D expects a channel dimension).
-    X = X.reshape(-1, IMG_SIZE, IMG_SIZE, 1)
-
-    return X
-
-
-# --- Splitting -------------------------------------------------------------
 
 def split_data(X, y, val_size=0.10, test_size=0.10):
-    """Three-way stratified split into train / validation / test.
+    """Three-way stratified split: train / val / test.
 
-    Stratify=y keeps each class's proportion roughly equal across all three
-    splits, which matters here because the classes are imbalanced.
-
-    The test set is carved out first and then left alone until final
-    evaluation, so it remains an honest estimate of unseen performance.
+    Test is carved out first and left untouched until final evaluation.
+    val_size is rescaled so it remains the intended fraction of the whole set.
     """
-    # First split off the test set (its fraction of the whole).
     X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y,
-        test_size=test_size,
-        stratify=y,
-        random_state=RANDOM_SEED,
+        X, y, test_size=test_size, stratify=y, random_state=RANDOM_SEED
     )
-
-    # From what's left, split off the validation set. We rescale val_size so
-    # it still ends up as the intended fraction of the ORIGINAL dataset.
     val_relative = val_size / (1.0 - test_size)
     X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp,
-        test_size=val_relative,
-        stratify=y_temp,
-        random_state=RANDOM_SEED,
+        X_temp, y_temp, test_size=val_relative, stratify=y_temp,
+        random_state=RANDOM_SEED
     )
-
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 
-# --- Public entry point ----------------------------------------------------
-
 def get_datasets():
-    """Load, prepare, and split the data in one call.
+    """Load both datasets, merge, prepare, and split. Returns six arrays."""
+    X_h, y_h = load_hmbd()
+    X_a, y_a = load_ahcd()
 
-    Returns six arrays: X_train, X_val, X_test, y_train, y_val, y_test.
-    This is the function train.py imports.
-    """
-    X, y = load_raw()
+    if X_a is not None:
+        X = np.concatenate([X_h, X_a], axis=0)
+        y = np.concatenate([y_h, y_a], axis=0)
+        print(f"MERGED: {X.shape[0]} total samples, "
+              f"{len(np.unique(y))} classes")
+    else:
+        X, y = X_h, y_h
+
     X = prepare_images(X)
     return split_data(X, y)
 
 
-# Quick manual check: run `python src/data.py` to verify shapes look right.
 if __name__ == "__main__":
     X_train, X_val, X_test, y_train, y_val, y_test = get_datasets()
+    print()
     print(f"Train: {X_train.shape}, {y_train.shape}")
     print(f"Val:   {X_val.shape}, {y_val.shape}")
     print(f"Test:  {X_test.shape}, {y_test.shape}")
-    print(f"Classes: {len(np.unique(y_train))}")
+    print(f"Classes: {len(np.unique(y_train))} (expected {NUM_BASE_CLASSES})")
     print(f"Pixel range: [{X_train.min():.2f}, {X_train.max():.2f}]")
+
+    _, counts = np.unique(y_train, return_counts=True)
+    print(f"Train samples per class: min {counts.min()}, "
+          f"max {counts.max()}, avg {counts.mean():.0f}")
