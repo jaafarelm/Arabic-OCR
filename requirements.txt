@@ -1,0 +1,13 @@
+# requirements.txt — for Streamlit Community Cloud deployment.
+#
+# NOTE: the CPU-only torch build is requested via the extra index URL so the
+# deploy does not pull the ~3GB CUDA wheel (which would exceed the free
+# tier's resources).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch
+torchvision
+streamlit>=1.30
+numpy
+pandas
+pillow
